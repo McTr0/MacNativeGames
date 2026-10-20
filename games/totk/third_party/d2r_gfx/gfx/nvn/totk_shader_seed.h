@@ -48,22 +48,17 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
         NSDictionary *old = oldData ? [NSJSONSerialization JSONObjectWithData:oldData options:0 error:nil] : nil;
         NSRegularExpression *safe = [NSRegularExpression regularExpressionWithPattern:
             @"^(?:[0-9a-f]{64}\\.variants|[0-9a-f]{64}-[0-9a-f]{12}_b\\.(?:metal|json|metallib)|pso_manifest\\.tsv|shader-keys\\.json)$" options:0 error:nil];
+        // shader-keys.json (the warm-up scope, PR #84) is checked with the rest but read from the seed folder itself
+        // (totk_shader_rt.m shader_scope), so it is never copied into the writable cache.
+        NSString *const scopeName = @"shader-keys.json";
         BOOL installed = [old isKindOfClass:NSDictionary.class] && [old[@"files_sha256"] isEqual:fingerprint];   // receipts from before 2026-10-18 (manifest_sha256) are checked once more
         for (id name in names) {
             if (![name isKindOfClass:NSString.class] || ![safe numberOfMatchesInString:name options:0 range:NSMakeRange(0, [name length])]) {
                 problem = @"Unsafe startup shader seed filename"; goto fail;
             }
-            if (![fm fileExistsAtPath:[cache stringByAppendingPathComponent:name]]) installed = NO;
+            if (![name isEqualToString:scopeName] && ![fm fileExistsAtPath:[cache stringByAppendingPathComponent:name]]) installed = NO;
         }
-        if (installed) {
-            // An older seed has no scope. Do not leave another version's scope in
-            // writable storage; fill packs (no marker) never remove seed metadata.
-            if (marker && !files[@"shader-keys.json"]) {
-                NSString *stale = [cache stringByAppendingPathComponent:@"shader-keys.json"];
-                if ([fm fileExistsAtPath:stale] && ![fm removeItemAtPath:stale error:error]) return nil;
-            }
-            return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @0};
-        }
+        if (installed) return @{@"available": @YES, @"shaders": m[@"shaders"], @"imported_files": @0};
         // Validate the complete source before changing any existing cache entry.
         NSUInteger checked = 0;
         for (NSString *name in names) {
@@ -80,12 +75,13 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
             BOOL isIndex = [name hasSuffix:@".variants"];
             if (isIndex != indexes.boolValue) continue;
             if (totk_seed_progress && (++copied % 256 == 0 || copied == names.count)) totk_seed_progress(1, copied, names.count);
+            if ([name isEqualToString:scopeName]) continue;
             NSString *target = [cache stringByAppendingPathComponent:name], *from = [source stringByAppendingPathComponent:name];
             if (!isIndex) {
                 if ([fm fileExistsAtPath:target]) {
                     // Preserve shaders collected on this Mac. A device library (iOS) is only ever made from its source on
                     // the Mac, so a different one is a rebuild, e.g. with safe math instead of Metal's default fast math.
-                    if (![name hasSuffix:@".metallib"] && ![name isEqualToString:@"shader-keys.json"]) continue;
+                    if (![name hasSuffix:@".metallib"]) continue;
                     NSData *data = [NSData dataWithContentsOfFile:from options:0 error:error];
                     if (!data) return nil;
                     if ([[NSData dataWithContentsOfFile:target] isEqualToData:data]) continue;
@@ -130,10 +126,6 @@ static NSDictionary *totk_seed_import_into(NSString *source, NSString *cache, NS
             }
             if (![data writeToFile:target options:NSDataWritingAtomic error:error]) return nil;
             imported++;
-        }
-        if (marker && !files[@"shader-keys.json"]) {
-            NSString *stale = [cache stringByAppendingPathComponent:@"shader-keys.json"];
-            if ([fm fileExistsAtPath:stale] && ![fm removeItemAtPath:stale error:error]) return nil;
         }
         NSData *receipt = [NSJSONSerialization dataWithJSONObject:@{@"files_sha256": fingerprint} options:0 error:error];
         if (marker && (!receipt || ![receipt writeToFile:marker options:NSDataWritingAtomic error:error])) return nil;

@@ -34,7 +34,73 @@ def bnsh():
     return b
 
 
+def bnsh_botw():
+    """Breath of the Wild's layout: control sections of 0x7d1 bytes that say so at +0x7c8, each followed by other data."""
+    b = bnsh()
+    for i in range(3):
+        control = 0x400+i*0x880
+        struct.pack_into('<I', b, control+0x20, 0x7d1)
+        b[control+0x7d1:control+0x880] = bytes([0xee])*(0x880-0x7d1)   # what follows: not the shader's
+        struct.pack_into('<I', b, 0x200+i*64+8+20, 0x7d1)   # the program table's control size
+    return b
+
+
 class ShaderInventory(unittest.TestCase):
+    def test_the_key_hashes_the_control_sections_own_size_as_the_runtime_does(self):
+        self.assertEqual(seed.control_key_len(bytes(0x880)), 0x880)              # no size word: the NVN 55 section
+        self.assertEqual(seed.control_key_len(bytes(0x20)+struct.pack('<I', 0x88c)+bytes(0x860)), 0x880)   # 0x88c: hashed as 0x880
+        self.assertEqual(seed.control_key_len(bytes(0x20)+struct.pack('<I', 0x7d1)+bytes(0x860)), 0x7d1)
+        self.assertEqual(seed.control_key_len(bytes(0x20)+struct.pack('<I', 0x848)+bytes(0x860)), 0x848)
+        agl = bytes(0x14)+b'\x40\0\0\0'+bytes(8)+struct.pack('<I', 0x848)+bytes(0x848-0x24)
+        self.assertEqual(seed.bound_control(agl), agl)                    # Tears of the Kingdom: as in the archive
+        self.assertEqual(seed.bound_control(agl, 'botw')[0x14:0x16], bytes(2))
+        self.assertEqual(seed.bound_control(agl, 'botw')[0x790], 0x1c)
+        self.assertEqual(seed.bound_control(agl[:0x7d1], 'botw'), agl[:0x7d1])   # only the 0x848 sections are rewritten
+        self.assertEqual(seed.bound_control(agl, 'botw', embedded=False), agl)    # an agl package's own record: bound as it is
+        rows = list(seed.bnsh_shaders(bnsh_botw()))
+        self.assertEqual([(r[1], len(r[2])) for r in rows], [('vs', 0x7d1), ('ps', 0x7d1), ('cs', 0x7d1)])
+        for key, _, control, code in rows:
+            self.assertEqual(key, hashlib.sha256(control+code).hexdigest())
+            self.assertNotIn(0xee, control)
+
+    def test_yaz0_round_trip_with_literals_and_overlapping_copies(self):
+        plain = b'abcabcabcabcabcabcXYZ' + bytes(range(256))*3 + b'Q'*300
+        # a reference encoder: greedy longest match, as the tools that wrote the game's files do
+        out = bytearray(b'Yaz0' + struct.pack('>I', len(plain)) + bytes(8)); i = 0
+        while i < len(plain):
+            code, items = 0, bytearray()
+            for bit in range(8):
+                if i >= len(plain):
+                    break
+                best, at = 0, 0
+                for dist in range(1, min(i, 0x1000)+1):
+                    n = 0
+                    while n < min(0x111, len(plain)-i) and plain[i+n] == plain[i-dist+n]:
+                        n += 1
+                    if n > best:
+                        best, at = n, dist
+                if best >= 3:
+                    if best >= 0x12:
+                        items += bytes([(at-1) >> 8, (at-1) & 0xff, best-0x12])
+                    else:
+                        items += bytes([(best-2) << 4 | (at-1) >> 8, (at-1) & 0xff])
+                    i += best
+                else:
+                    code |= 0x80 >> bit; items.append(plain[i]); i += 1
+            out += bytes([code]) + items
+        self.assertEqual(seed.yaz0(bytes(out)), plain)
+        with self.assertRaises(ValueError):
+            seed.yaz0(bytes(out[:-5]))
+
+    def test_sarc_members_named_with_a_leading_slash_are_accepted(self):
+        name = b'/x.bgdata\0\0\0\0\0\0\0'
+        b = bytearray(b'SARC' + struct.pack('<HHIIHH', 0x14, 0xfeff, 0, 0x100, 0x100, 0))   # header, BOM, size, data offset, version
+        b += b'SFAT' + struct.pack('<HHI', 0xc, 1, 0x65) + struct.pack('<4I', 0, 0x01000000, 0, 4)
+        b += b'SFNT' + struct.pack('<HH', 8, 0) + name
+        b += bytes(0x100-len(b)) + b'DATA'
+        struct.pack_into('<I', b, 8, len(b))
+        self.assertEqual(seed.sarc(bytes(b)), {'x.bgdata': b'DATA'})
+
     def test_actual_stage_offsets_and_runtime_hash_contract(self):
         rows = list(seed.bnsh_shaders(bnsh()))
         self.assertEqual([r[1] for r in rows], ['vs', 'ps', 'cs'])
@@ -101,8 +167,6 @@ class ShaderKeyScope(unittest.TestCase):
         scope = seed.shader_key_scope(['b'*64, 'a'*64, 'b'*64], '1.2.1', 'c'*64)
         self.assertEqual(scope, dict(schema=1, chain=seed.CHAIN, version='1.2.1',
                                      source_romfs_sha256='c'*64, keys=['a'*64, 'b'*64]))
-        snapshot = dict(romfs_sha256='c'*64, shaders={'b'*64: {'stage': 'ps'}})
-        self.assertEqual(seed.inventory_snapshot_scope(snapshot, '1.2.1', located_keys=['a'*64]), scope)
 
     def test_invalid_identity_or_variant_names_cannot_become_raw_keys(self):
         for keys in [[], 'a'*64, ['a'*63], ['A'*64], ['g'*64], ['a'*64+'-123456789abc'], [None]]:
@@ -113,10 +177,6 @@ class ShaderKeyScope(unittest.TestCase):
             values.update(kwargs)
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 seed.shader_key_scope(**values)
-        for snapshot in [dict(romfs_sha256='c'*64, shaders={}, chain='other'),
-                         dict(romfs_sha256='c'*64, shaders={'a'*64: {}}, version='1.0.0')]:
-            with self.subTest(snapshot=snapshot), self.assertRaises(ValueError):
-                seed.inventory_snapshot_scope(snapshot, '1.2.1')
 
     def test_preparation_keeps_untranslated_and_located_keys_and_rebuilds_old_seed(self):
         # A tiny service prepares one startup shader. The other inventory shader and verified locator need no startup
@@ -146,7 +206,7 @@ class ShaderKeyScope(unittest.TestCase):
             shaders = {key: (stage, control, code, 'Shader/test') for key, stage, control, code in rows[:2]}
             extra = {rows[2][0]: (*rows[2][1:], 'module:main')}
             output = root/'seed'
-            with mock.patch.object(seed, 'MIN_SHADERS', 1), \
+            with mock.patch.object(seed, 'MIN_SHADERS', 1), mock.patch.dict(seed.GAMES['totk'], min_shaders=1), \
                     mock.patch.object(seed, 'inventory', return_value=({}, shaders, {rows[0][0]}, [])) as inventory, \
                     mock.patch.object(seed, 'source_reader', return_value=lambda _: None), \
                     mock.patch.object(seed, 'located', return_value=extra), \

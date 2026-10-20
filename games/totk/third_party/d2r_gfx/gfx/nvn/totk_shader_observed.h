@@ -8,8 +8,8 @@
 
 // The small mutable state is private to the translator. Access is synchronized,
 // and snapshots are immutable so the warm-up can consume them on another thread.
-static NSMutableDictionary *totk_shader_observed_open(NSString *seedDir, NSString *cacheDir, NSString *chain) {
-    NSDictionary *scope = totk_shader_scope_metadata(seedDir, chain);
+// scope: totk_shader_scope_metadata() of this app's seed (parsed once by the caller).
+static NSMutableDictionary *totk_shader_observed_open(NSDictionary *scope, NSString *cacheDir, NSString *chain) {
     if (!scope || ![cacheDir isKindOfClass:NSString.class] || !cacheDir.length) return nil;
     NSDictionary *identity = @{@"schema": @1, @"chain": chain, @"version": scope[@"version"],
                                @"source_romfs_sha256": scope[@"source_romfs_sha256"]};

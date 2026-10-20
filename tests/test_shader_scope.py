@@ -30,14 +30,15 @@ int main(int argc, const char **argv) { @autoreleasepool {
  if (argc == 4 && !strcmp(argv[1], "--import")) result = totk_seed_import(@(argv[2]), @(argv[3]), &error);
  else if (argc == 4 && !strcmp(argv[1], "--fill")) result = totk_fill_import(@(argv[2]), @(argv[3]));
  else if (argc == 6 && !strcmp(argv[1], "--observed")) {
-   NSMutableDictionary *state = totk_shader_observed_open(@(argv[2]), @(argv[3]), @(argv[4]));
+   NSMutableDictionary *state = totk_shader_observed_open(totk_shader_scope_metadata(@(argv[2]), @(argv[4])), @(argv[3]), @(argv[4]));
    NSArray *queries = [NSJSONSerialization JSONObjectWithData:[@(argv[5]) dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
    NSMutableArray *added = [NSMutableArray array];
    for (id key in queries) [added addObject:@(totk_shader_observed_note(state, key))];
    result = @{@"added": added, @"keys": [[totk_shader_observed_keys(state) allObjects] sortedArrayUsingSelector:@selector(compare:)]};
  }
  else if (argc == 5 && !strcmp(argv[1], "--scope")) {
-   NSSet<NSString *> *scope = totk_shader_scope_load(@(argv[2]), @(argv[3]));
+   NSDictionary *metadata = totk_shader_scope_metadata(@(argv[2]), @(argv[3]));
+   NSSet<NSString *> *scope = metadata ? [NSSet setWithArray:metadata[@"keys"]] : nil;
    NSArray *queries = [NSJSONSerialization JSONObjectWithData:[@(argv[4]) dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
    NSMutableArray *answers = [NSMutableArray array];
    for (id key in queries) [answers addObject:@(totk_shader_scope_contains(scope, key))];
@@ -207,48 +208,25 @@ int main(int argc, const char **argv) { @autoreleasepool {
                     manifest.write_text(json.dumps(data))
                 self.assertEqual(self.scope(source, ['d'*64]), dict(loaded=False, count=0, answers=[True]))
 
-    def test_import_replaces_scope_metadata_but_preserves_collected_shaders(self):
+    def test_import_checks_the_scope_but_leaves_it_in_the_seed(self):
+        # The runtime reads shader-keys.json from the seed folder (totk_shader_rt.m shader_scope), so the import
+        # verifies it with the other files but never writes it into the cache; collected shaders are kept.
         with tempfile.TemporaryDirectory() as folder:
             source, cache = self.fixture(Path(folder))
             self.probe('--import', source, cache)
-            self.assertEqual((cache/'shader-keys.json').read_bytes(), (source/'shader-keys.json').read_bytes())
+            self.assertFalse((cache/'shader-keys.json').exists())
             (cache/(VARIANT+'.metal')).write_bytes(b'// collected here')
             self.mutate_scope(source, lambda scope: scope.__setitem__('keys', [KEY, 'd'*64]))
-            self.assertEqual(self.probe('--import', source, cache)['imported_files'], 1)
-            self.assertEqual((cache/'shader-keys.json').read_bytes(), (source/'shader-keys.json').read_bytes())
-            self.assertEqual((cache/(VARIANT+'.metal')).read_bytes(), b'// collected here')
             self.assertEqual(self.probe('--import', source, cache)['imported_files'], 0)
+            self.assertFalse((cache/'shader-keys.json').exists())
+            self.assertEqual((cache/(VARIANT+'.metal')).read_bytes(), b'// collected here')
+            self.assertEqual(self.scope(source, ['d'*64])['loaded'], True)
 
-    def test_older_seed_removes_stale_scope_on_import_and_receipt_reuse(self):
+    def test_a_damaged_scope_fails_the_import_like_any_seed_file(self):
         with tempfile.TemporaryDirectory() as folder:
-            source, cache = self.fixture(Path(folder), scoped=False)
-            for _ in range(2):
-                (cache/'shader-keys.json').write_text('scope from another game version')
-                self.probe('--import', source, cache)
-                self.assertFalse((cache/'shader-keys.json').exists())
-
-    def test_rejected_import_does_not_replace_or_remove_existing_scope(self):
-        for scoped in [True, False]:
-            with self.subTest(scoped=scoped), tempfile.TemporaryDirectory() as folder:
-                source, cache = self.fixture(Path(folder), scoped=scoped)
-                original = b'valid earlier scope'
-                (cache/'shader-keys.json').write_bytes(original)
-                (source/(VARIANT+'.metal')).write_text('corrupt source')
-                self.probe('--import', source, cache, good=False)
-                self.assertEqual((cache/'shader-keys.json').read_bytes(), original)
-
-    def test_fill_without_scope_preserves_current_seed_scope(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            source, cache = self.fixture(root, scoped=False)
-            original = b'current seed scope'
-            (cache/'shader-keys.json').write_bytes(original)
-            fills = root/'fills'; fills.mkdir()
-            source.rename(fills/'pack')
-            result = self.probe('--fill', fills, cache)
-            self.assertEqual(result['packs'], 1)
-            self.assertEqual((cache/'shader-keys.json').read_bytes(), original)
-
+            source, cache = self.fixture(Path(folder))
+            (source/'shader-keys.json').write_text('{"schema": 1}')
+            self.probe('--import', source, cache, good=False)
 
 if __name__ == '__main__':
     unittest.main()

@@ -24,7 +24,9 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from build_app import METAL_FLAGS, metal_compiler  # noqa: E402
 
-CHAIN = 'totk-native-v4-unverified'
+# Follow the production translation chain, including future cache invalidations.
+CHAIN_HEADER = Path(__file__).resolve().parents[1]/'third_party/d2r_gfx/gfx/nvn/dmsh_chain.h'
+CHAIN = re.search(r'#define DMSH_CHAIN "([^"\n]+)"', CHAIN_HEADER.read_text())[1]
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 SOURCE = re.compile(r'([0-9a-f]{64})(?:-[0-9a-f]{12})?_b\.metal\Z')
 KINDS = {'vs': 'vertex', 'ps': 'fragment', 'cs': 'kernel'}

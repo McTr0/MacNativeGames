@@ -141,7 +141,7 @@ int main(int argc, const char **argv) {
                             if (!library) record_error(errors, hash, @"source compilation", error);
                         }
                     } else {
-                        library = [device newLibraryWithURL:[NSURL fileURLWithPath:paths[hash]] error:&error];
+                        library = totk_shader_library_load(device, paths[hash], &error);
                         if (!library) record_error(errors, hash, @"persisted library loading", error);
                     }
                     if (library) {

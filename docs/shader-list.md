@@ -9,7 +9,7 @@ in a pull request.
 The game builds a shader *variant* from each shader for the bind state of a draw: which kind of texture sits in each
 slot, attribute types, output formats. A variant can only be translated once it is known.
 
-- On the Mac, a missing variant is translated while you play. That can stall the first draw that needs it.
+- On the Mac, a missing variant is translated while you play. That costs a short stall the first time.
 - An iPhone or iPad cannot translate. It skips any draw whose variant the app does not already carry. A new install
   with only the default variants shows little or nothing of the picture.
 
@@ -48,30 +48,17 @@ build uses only those found in the selected game files.
 The build exports the warm rows to `build/pso_title.tsv` (rows marked `t`) and `build/pso_manifest.tsv` (rows marked
 `m`), which the runtime reads. Edit the list, never those files.
 
-## Warm-up scope and local Metal libraries
+## Warm-up scope
 
-Raw keys actually used outside the static inventory are recorded in `observed/<RomFS SHA>.keys` inside the
-translation cache, under the exact game and translation-chain identity. The runtime and offline library tool
-include these observations too; historical cache files alone do not establish current-game use.
+The prepared seed also carries `shader-keys.json`: every shader key found in the selected game files, including shaders
+that were not translated. The background warm-up warms only cache entries of those shaders, plus shaders the game was
+seen to use on this Mac (`observed/<RomFS SHA>.keys` in the translation cache). Entries of other game versions in the
+shared cache are skipped during warm-up only, never deleted or refused for drawing. Without a valid scope (an older
+app) the whole cache is warmed as before; `TOTK_WARM_ALL=1` does that for comparison. Not used on iPhone / iPad.
 
-The prepared seed also carries `shader-keys.json`: a schema 1 inventory of every raw shader key verified in the
-selected game files and locators, including shaders that have not been translated successfully. Its chain, game
-version and RomFS identity agree with the seed manifest, which hashes the inventory file. The runtime uses that
-scope for warm rows and supplemental cache scans. A known key keeps all its cached bind-state variants eligible;
-unrelated cache entries are skipped during warm-up, never deleted or disabled for actual draws. Without valid
-metadata, older Apps keep the previous full-cache warm-up. `TOTK_WARM_ALL=1` forces that policy for comparison.
-
-On Mac, `prepare_shader_libraries.py` can compile already translated variants into a persistent user library without
-repacking the App. It takes `--inventory <seed>/shader-keys.json`, selects complete source/reflection pairs from this
-game and chain, and names libraries by the exact MSL SHA-256. Compiler identity and safe math options isolate builds;
-`--app-libraries` avoids duplicating bundled hashes, and `--compiler` selects an installed Metal compiler explicitly.
-The runtime tries the App library, then the user library at `totk_rt_dir()/metal-libraries`, then source compilation.
-`TOTK_SHADER_LIBRARIES=<directory>` overrides that directory; `TOTK_SHADER_LIBRARIES=off` disables only user libraries
-for A/B tests. See [the isolated uv command and validation procedure](first-launch-shaders.md#当前游戏范围与持久用户库).
-
-These libraries contain game-derived data and stay outside the source checkout. They are not shared-list
-contributions. Unknown bind states still require translation on Mac, and final GPU pipelines may still need creation;
-neither more list entries nor an offline library guarantees stutter-free play.
+On macOS, the optional [persistent-library tool](persistent-shader-libraries.md) can compile already translated
+variants into a user library cache without repackaging the App. It is separate from the shared identifier list and
+requires a manual preparation step.
 
 ## Sending what you played (players)
 
@@ -89,6 +76,28 @@ iPad never asks during play: while it is connected to the Mac that built its app
 "Don't remind me again" stops the reminders for good (the file is still kept). "Send" opens the [shader list contribution](https://github.com/ly05010419/MacNativeGames/issues/new?template=shader-list.yml)
 issue form; drag the file into it. Later reminders come at 1,000, 1,500 and so on, so sending the whole file each time
 is fine: rows the list already has are skipped. The game never uploads anything by itself.
+
+## Breath of the Wild
+
+Breath of the Wild has its own list, `games/botw/assets/shader_list.tsv`, in the same format and kept with the same
+tools (`shader_list.py merge ... games/botw/assets/shader_list.tsv <folder or file>`). Its build reads the game's
+Yaz0 packages (`Pack/`, `Effect/`, `Event/`, `System/`: the `uking_*.sbfsha` material archives and the engine's agl
+packages) and translates the boot and title packages' shaders for the default bind state plus every state the list
+names (`games/botw/scripts/prepare_shader_seed.py`). Its players' contribution file is
+`~/Library/Application Support/MacNativeGames/BotW/shader-list-contribution.txt`, sent with the
+[Breath of the Wild issue form](https://github.com/ly05010419/MacNativeGames/issues/new?template=shader-list-botw.yml)
+(label `shader-list-botw`; `collect_shader_issues.py --game botw` merges them). The lists never mix: a key names a
+shader of one game only.
+
+Its shader key hashes the control section's own length (the word at +0x20: 0x7d1 for the game's archives, 0x848 for
+agl's; Tears of the Kingdom's is 0x880, so its keys are unchanged) and, for the agl programs the game loads from
+embedded BNSH files, the bytes as the game rewrites them before binding (`prepare_shader_seed.py bound_control`); the
+agl packages' own records are bound unchanged.
+
+Title rows (`t`) of either game must be recorded in a cache that has the prepared seed imported (the warm-up loads a
+row's shader by its file name, and the seed names its variants by their bind-state answers, not as a cache translated
+on the spot would): run the game with `DM_PSO_MANIFEST=off`, an empty `DM_NVN_SHMAP` folder and
+`TOTK_SHADER_SEED_DIR=<prepared seed>`, then `shader_list.py merge --title ... <profile>/pso_user.tsv`.
 
 ## Merging what players sent (maintainers)
 
@@ -109,7 +118,7 @@ Use `games/totk/scripts/shader_list.py`. It needs only Python 3.
 ```sh
 # Mac: add the shaders your own translation cache holds
 python3 games/totk/scripts/shader_list.py merge games/totk/assets/shader_list.tsv \
-  "$HOME/Library/Application Support/MacNativeGames/TOTK/shader-cache/rt-totk-native-v4-unverified"
+  "$HOME/Library/Application Support/MacNativeGames/TOTK/shader-cache/rt-totk-native-v5-unverified"
 
 # check the result, then commit the list and open a pull request
 python3 games/totk/scripts/shader_list.py stats games/totk/assets/shader_list.tsv
@@ -151,5 +160,4 @@ The tool drops rows that are not shader identifiers. Merging the same source twi
   - Mac：`python3 games/totk/scripts/shader_list.py merge games/totk/assets/shader_list.tsv <自己的翻译缓存目录>`，再运行 `locate_shaders.py` 补上定位行，用 `stats` 检查，提交清单并提 PR。
   - iOS：`fill_shaders.py` 补译后会自动把变体并进清单。
 - **审核**：`stats` 和 `tests/test_shader_list.py` 要通过；PR 只能改这一个文件，不能带翻译出的 `.metal`、编好的 `.metallib` 或缓存。
-- **当前预热范围**：种子的 `shader-keys.json` 是所选游戏原始键的完整范围，和成功翻译的变体数不同。运行时只预热范围内的清单和缓存条目，不删除其他缓存；旧 App 缺少有效元数据时沿用完整预热，`TOTK_WARM_ALL=1` 可作对照。
-- **本机补库**：`prepare_shader_libraries.py` 可把已翻译变体按 MSL SHA-256 和 safe math 编成持久用户库，默认位于 `totk_rt_dir()/metal-libraries`，不需重打包 App。`TOTK_SHADER_LIBRARIES=off` 仅关闭用户库查找。具体 `uv` 隔离调用及参数见[首次启动说明](first-launch-shaders.md#当前游戏范围与持久用户库)。首次未知变体仍需翻译，不承诺消除所有卡顿。
+- **旷野之息**：自己的一份清单 `games/botw/assets/shader_list.tsv`，格式、工具都一样（`merge` 时写它的路径）。打包时读它的 Yaz0 包（`Pack/`、`Effect/`、`Event/`、`System/`），启动包和标题包的着色器按默认绑定状态翻译、清单里的绑定状态也翻译。玩家的贡献文件在 `~/Library/Application Support/MacNativeGames/BotW/`，用旷野之息自己的 Issue 表单（标签 `shader-list-botw`），`collect_shader_issues.py --game botw` 合并。两份清单不混：一个键只属于一个游戏。它的键按控制段自己的长度算（+0x20 处的字：档案里 0x7d1、agl 的 0x848；王国之泪是 0x880，键不变）；agl 包里嵌着的 BNSH 程序还按游戏绑定前改写过的字节算（`bound_control`），agl 包自己的记录原样绑定。

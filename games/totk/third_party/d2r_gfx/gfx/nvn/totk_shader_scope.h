@@ -1,5 +1,5 @@
-// Restrict opportunistic cache warm-up to shaders verified in this app's game.
-// No scope (an older app or invalid metadata) keeps the previous warm-up policy.
+// The background warm-up scope (PR #84): the shader keys of this app's game version, from the seed's shader-keys.json
+// checked against seed-manifest.json. No scope (an older app or invalid metadata) warms the whole cache as before.
 #pragma once
 #import <Foundation/Foundation.h>
 #include <CommonCrypto/CommonDigest.h>
@@ -45,11 +45,6 @@ static NSDictionary *totk_shader_scope_metadata(NSString *seedDir, NSString *cha
         if (!totk_shader_scope_hex(key, 64)) return nil;
     }
     return scope;
-}
-
-static NSSet<NSString *> *totk_shader_scope_load(NSString *seedDir, NSString *chain) {
-    NSDictionary *metadata = totk_shader_scope_metadata(seedDir, chain);
-    return metadata ? [NSSet setWithArray:metadata[@"keys"]] : nil;
 }
 
 static BOOL totk_shader_scope_contains(NSSet<NSString *> *scope, NSString *key) {

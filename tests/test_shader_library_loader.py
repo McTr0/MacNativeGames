@@ -26,7 +26,7 @@ class ShaderLibraryLoader(unittest.TestCase):
 int main(int argc, const char **argv) { @autoreleasepool {
  if (argc != 3) return 2;
  // The scope loader is independent: lookup does not require shader-keys.json.
- (void)totk_shader_scope_load; (void)totk_shader_scope_contains;
+ (void)totk_shader_scope_metadata; (void)totk_shader_scope_contains;
  NSDictionary *paths = totk_shader_libraries_read(@(argv[1]), @(argv[2]));
  NSDictionary *result = @{@"loaded": @(paths != nil), @"paths": paths ?: @{}};
  NSData *data = [NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
