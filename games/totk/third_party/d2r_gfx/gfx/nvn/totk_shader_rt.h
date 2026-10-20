@@ -4,6 +4,9 @@
 #import <Foundation/Foundation.h>
 #include <stdint.h>
 NSString *totk_rt_dir(void);
+// Current-game raw shader keys observed outside the bundled static inventory.
+// Includes persisted earlier sessions and returns an immutable snapshot.
+NSSet<NSString *> *totk_rt_observed_shader_keys(void);
 // Returns the variant name whose <dir>/<variant>_b.{metal,json} match the answers, translating when needed.
 // stage: NVN shader stage (0 vertex, 1 fragment, 5 compute). answers: {"tex","img","attr","fout"} dictionaries.
 NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, const uint8_t *code, NSDictionary *answers, NSArray *local);   // nil on iOS when the variant is not translated yet (request recorded)

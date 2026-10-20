@@ -9,7 +9,7 @@ in a pull request.
 The game builds a shader *variant* from each shader for the bind state of a draw: which kind of texture sits in each
 slot, attribute types, output formats. A variant can only be translated once it is known.
 
-- On the Mac, a missing variant is translated while you play. That costs a short stall the first time.
+- On the Mac, a missing variant is translated while you play. That can stall the first draw that needs it.
 - An iPhone or iPad cannot translate. It skips any draw whose variant the app does not already carry. A new install
   with only the default variants shows little or nothing of the picture.
 
@@ -47,6 +47,31 @@ build uses only those found in the selected game files.
 
 The build exports the warm rows to `build/pso_title.tsv` (rows marked `t`) and `build/pso_manifest.tsv` (rows marked
 `m`), which the runtime reads. Edit the list, never those files.
+
+## Warm-up scope and local Metal libraries
+
+Raw keys actually used outside the static inventory are recorded in `observed/<RomFS SHA>.keys` inside the
+translation cache, under the exact game and translation-chain identity. The runtime and offline library tool
+include these observations too; historical cache files alone do not establish current-game use.
+
+The prepared seed also carries `shader-keys.json`: a schema 1 inventory of every raw shader key verified in the
+selected game files and locators, including shaders that have not been translated successfully. Its chain, game
+version and RomFS identity agree with the seed manifest, which hashes the inventory file. The runtime uses that
+scope for warm rows and supplemental cache scans. A known key keeps all its cached bind-state variants eligible;
+unrelated cache entries are skipped during warm-up, never deleted or disabled for actual draws. Without valid
+metadata, older Apps keep the previous full-cache warm-up. `TOTK_WARM_ALL=1` forces that policy for comparison.
+
+On Mac, `prepare_shader_libraries.py` can compile already translated variants into a persistent user library without
+repacking the App. It takes `--inventory <seed>/shader-keys.json`, selects complete source/reflection pairs from this
+game and chain, and names libraries by the exact MSL SHA-256. Compiler identity and safe math options isolate builds;
+`--app-libraries` avoids duplicating bundled hashes, and `--compiler` selects an installed Metal compiler explicitly.
+The runtime tries the App library, then the user library at `totk_rt_dir()/metal-libraries`, then source compilation.
+`TOTK_SHADER_LIBRARIES=<directory>` overrides that directory; `TOTK_SHADER_LIBRARIES=off` disables only user libraries
+for A/B tests. See [the isolated uv command and validation procedure](first-launch-shaders.md#当前游戏范围与持久用户库).
+
+These libraries contain game-derived data and stay outside the source checkout. They are not shared-list
+contributions. Unknown bind states still require translation on Mac, and final GPU pipelines may still need creation;
+neither more list entries nor an offline library guarantees stutter-free play.
 
 ## Sending what you played (players)
 
@@ -126,3 +151,5 @@ The tool drops rows that are not shader identifiers. Merging the same source twi
   - Mac：`python3 games/totk/scripts/shader_list.py merge games/totk/assets/shader_list.tsv <自己的翻译缓存目录>`，再运行 `locate_shaders.py` 补上定位行，用 `stats` 检查，提交清单并提 PR。
   - iOS：`fill_shaders.py` 补译后会自动把变体并进清单。
 - **审核**：`stats` 和 `tests/test_shader_list.py` 要通过；PR 只能改这一个文件，不能带翻译出的 `.metal`、编好的 `.metallib` 或缓存。
+- **当前预热范围**：种子的 `shader-keys.json` 是所选游戏原始键的完整范围，和成功翻译的变体数不同。运行时只预热范围内的清单和缓存条目，不删除其他缓存；旧 App 缺少有效元数据时沿用完整预热，`TOTK_WARM_ALL=1` 可作对照。
+- **本机补库**：`prepare_shader_libraries.py` 可把已翻译变体按 MSL SHA-256 和 safe math 编成持久用户库，默认位于 `totk_rt_dir()/metal-libraries`，不需重打包 App。`TOTK_SHADER_LIBRARIES=off` 仅关闭用户库查找。具体 `uv` 隔离调用及参数见[首次启动说明](first-launch-shaders.md#当前游戏范围与持久用户库)。首次未知变体仍需翻译，不承诺消除所有卡顿。

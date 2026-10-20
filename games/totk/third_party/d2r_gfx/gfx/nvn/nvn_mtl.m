@@ -40,6 +40,8 @@ static uint64_t g_gen_shown;            // interpolated frames handed to the scr
 #include "fps_overlay.h"
 #include "nvn_cover.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN：本源码树期望的 B 着色器库翻译链版本 | DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree
+#include "totk_shader_scope.h"
+#include "totk_shader_libraries.h"
 #include "nvn_hmap.h"
 #include "totk_lifelog.h"
 #include "totk_timeline.h"
@@ -4826,24 +4828,36 @@ static int drv_scan(NvShader *o, NSString *src) {   // src: the full MSL (iOS do
     if (nbad) MLOG("【红】着色器 %s（阶段 %d）读驱动段的这些位置回放层不填，读到 0：%s", o->key, o->stage, bad);
     return nunfill;
 }
-static _Atomic uint64_t g_rt_prebuilt, g_rt_compiled;   // TOTK: translated variants loaded precompiled (iOS) / compiled from MSL here (atomic: the warm-up loads on several threads)
+static _Atomic uint64_t g_rt_prebuilt, g_rt_compiled, g_rt_user_prebuilt;
 #if !TARGET_OS_IPHONE
 /* TOTK: the startup shaders compiled when the app was built (build_app.py step_shader_libs), named by the SHA-256 of their
    MSL, so only an exact match is used. Metal's own cache of libraries compiled here does not follow the app to a folder
    whose path has another length (measured: a full 4.5-minute warm-up again); these files move with the app. */
-static NSString *shader_lib_prebuilt_path(NSData *src) {
-    if (getenv("TOTK_FAST_MATH") && atoi(getenv("TOTK_FAST_MATH"))) return nil;   // built with safe math (totk_precise_opts)
-    static NSString *dir; static dispatch_once_t once; dispatch_once(&once, ^{ dir = exe_rel("shader-libs"); });
+static id<MTLLibrary> shader_lib_prebuilt(NSData *src) {
+    if (getenv("TOTK_FAST_MATH") && atoi(getenv("TOTK_FAST_MATH"))) return nil;
+    static NSString *dir; static NSDictionary<NSString *, NSString *> *user;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dir = exe_rel("shader-libs");
+        const char *e = getenv("TOTK_SHADER_LIBRARIES");
+        if (!(e && !strcmp(e, "off"))) {
+            NSString *root = e && *e ? @(e) : [totk_rt_dir() stringByAppendingPathComponent:@"metal-libraries"];
+            user = totk_shader_libraries_read(root, @DMSH_CHAIN);
+            if (user.count) MLOG("本机补编着色器库：%lu 个（按源码 SHA 精确匹配）", (unsigned long)user.count);
+        }
+    });
     unsigned char md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(src.bytes, (CC_LONG)src.length, md);
     char hex[2 * sizeof md + 1]; for (size_t i = 0; i < sizeof md; i++) snprintf(hex + 2 * i, 3, "%02x", md[i]);
-    NSString *path = [NSString stringWithFormat:@"%@/%s.metallib", dir, hex];
-    return dir && [NSFileManager.defaultManager fileExistsAtPath:path] ? path : nil;
-}
-static id<MTLLibrary> shader_lib_prebuilt(NSData *src) {
-    NSString *path = shader_lib_prebuilt_path(src); if (!path) return nil;
-    NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e);
-    if (!lib) MLOG("【红】预编译着色器库加载失败 %s：%s（改为现编）", path.lastPathComponent.UTF8String, e.localizedDescription.UTF8String);
-    return lib;
+    NSString *digest = @(hex);
+    NSString *bundled = dir ? [dir stringByAppendingPathComponent:[digest stringByAppendingPathExtension:@"metallib"]] : nil;
+    NSString *local = user[digest];
+    for (NSString *path in @[bundled ?: @"", local ?: @""]) {
+        if (!path.length || ![NSFileManager.defaultManager fileExistsAtPath:path]) continue;
+        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e);
+        if (lib) { if ([path isEqual:local]) atomic_fetch_add(&g_rt_user_prebuilt, 1); return lib; }
+        MLOG("【红】预编译着色器库加载失败 %s：%s（继续查找或现编）", path.lastPathComponent.UTF8String, e.localizedDescription.UTF8String);
+    }
+    return nil;
 }
 #endif
 static NvShader *shader_load(NSString *pc, int stage) {
@@ -6136,8 +6150,10 @@ static NSString *warm_key(const char *s, size_t n) {
     return [[NSString alloc] initWithBytes:s length:z encoding:NSUTF8StringEncoding];
 }
 static _Atomic uint64_t g_warm_missing;   // shaders named in the warm lists that are not in the translation cache (yet)
+static NSSet<NSString *> *g_warm_scope;
 static int warm_available(NSString *key) {
     if (!key.length) return 1;
+    if (!totk_shader_scope_contains(g_warm_scope, key)) return 0;
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *rt = totk_rt_dir();
     int have = [fm fileExistsAtPath:[rt stringByAppendingFormat:@"/%@.metal", key]] ||
@@ -6379,15 +6395,18 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
             if (path_index++ == 0) atomic_store(&g_warm_priority_done, 1);
         }
         atomic_store(&g_warm_priority_done, 1);
-        // The native port translates variants as they are discovered. Warm every variant already
-        // present in this translation-chain cache before the first playable scene is released.
+        // Keep all binding-state variants of this game's shaders, including those
+        // discovered while the manifests were warming. Other versions stay on disk
+        // and remain available on demand, without competing for compilation here.
         NSString *rt = totk_rt_dir();
         // Preserve variants translated while the manifest was warming. They
         // extend the measured total rather than being silently omitted.
         NSMutableArray<NSString *> *cache_files = [files mutableCopy];
         NSMutableSet<NSString *> *known_files = [NSMutableSet setWithArray:files];
+        NSSet<NSString *> *late_scope = g_warm_scope ? [g_warm_scope setByAddingObjectsFromSet:totk_rt_observed_shader_keys()] : nil;
         NSArray<NSString *> *latest = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:rt error:nil] sortedArrayUsingSelector:@selector(compare:)];
         for (NSString *file in latest) if ([file hasSuffix:@"_b.metal"] && ![known_files containsObject:file]) {
+            if (!totk_shader_scope_contains(late_scope, [file stringByDeletingPathExtension])) continue;
             // The native service publishes reflection last. A newly written
             // MSL with no reflection yet is still in flight, not a failed shader.
             NSString *json = [[file stringByDeletingPathExtension] stringByAppendingPathExtension:@"json"];
@@ -6431,6 +6450,8 @@ static void warm_worker(NSArray<NSString *> *paths, NSArray<NSString *> *files,
         MLOG("预热分段：着色器库 %llu 次 / %.1f ms（各线程用时相加），Metal 管线 %llu 次 / %.1f ms",
              (unsigned long long)atomic_load(&g_warm_library_count),atomic_load(&g_warm_library_ns)/1e6,
              (unsigned long long)atomic_load(&g_warm_pipeline_count),atomic_load(&g_warm_pipeline_ns)/1e6);
+        MLOG("预热库来源：预编译 %llu 次（本机补编 %llu 次），源码编译 %llu 次", (unsigned long long)atomic_load(&g_rt_prebuilt),
+             (unsigned long long)atomic_load(&g_rt_user_prebuilt), (unsigned long long)atomic_load(&g_rt_compiled));
     }
     atomic_store(&g_warm_running, 0);
     if (runtime_warm_done) runtime_warm_done();
@@ -6558,10 +6579,21 @@ static void warm_start(void) {
         NSMutableString *desc = [NSMutableString string];
         for (NSString *p in paths) { NSString *t = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
             [desc appendFormat:@"%@%@ %lu 行", desc.length ? @"，" : @"", p.lastPathComponent, (unsigned long)[t componentsSeparatedByString:@"\n"].count - 1]; }
-        MLOG("预热清单（自动着色器收集）：%s；另加翻译缓存里的全部着色器", desc.UTF8String);
+        MLOG("预热清单（自动着色器收集）：%s；另加当前游戏的缓存变体", desc.UTF8String);
     }
     if (!g_warm_items) g_warm_items = [NSMutableArray array];
-    NSArray<NSString *> *files = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:totk_rt_dir() error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[];
+    const char *all = getenv("TOTK_WARM_ALL"), *seedPath = getenv("TOTK_SHADER_SEED_DIR");
+    NSString *seedDir = seedPath && *seedPath ? @(seedPath) : exe_rel("shader-seed");
+    if (!(all && atoi(all))) g_warm_scope = totk_shader_scope_load(seedDir, @DMSH_CHAIN);
+    if (g_warm_scope) g_warm_scope = [g_warm_scope setByAddingObjectsFromSet:totk_rt_observed_shader_keys()];
+    NSArray<NSString *> *allFiles = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:totk_rt_dir() error:nil] sortedArrayUsingSelector:@selector(compare:)] ?: @[];
+    NSMutableArray<NSString *> *files = [NSMutableArray array];
+    NSUInteger skipped = 0;
+    for (NSString *file in allFiles) if ([file hasSuffix:@"_b.metal"]) {
+        if (totk_shader_scope_contains(g_warm_scope, [file stringByDeletingPathExtension])) [files addObject:file]; else skipped++;
+    }
+    MLOG("预热范围：%s，缓存着色器 %lu 个，跳过其他游戏内容 %lu 个（保留按需使用）", g_warm_scope ? "当前游戏" : "兼容完整缓存",
+         (unsigned long)files.count, (unsigned long)skipped);
     uint64_t total = 0, shader_total = 0, pipeline_total = 0;
     NSMutableSet<NSString *> *planned_keys = [NSMutableSet set];
     NSMutableSet<NSString *> *eligible = [NSMutableSet set];

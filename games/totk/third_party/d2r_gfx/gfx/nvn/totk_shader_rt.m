@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <stdatomic.h>
 #include "totk_shader_seed.h"
+#include "totk_shader_observed.h"
 #include "totk_shader_contrib.h"
 extern void runtime_boot_status(const char *,const char *) __attribute__((weak_import));
 extern void runtime_boot_count(const char *,uint64_t,uint64_t) __attribute__((weak_import));
@@ -95,6 +96,23 @@ NSString *totk_rt_dir(void) {
 #endif
     });
     return g_dir;
+}
+
+static NSMutableDictionary *observed_keys_state(void) {
+    static NSMutableDictionary *state; static dispatch_once_t once;
+    // Finish cache/seed initialization before entering this once token. Keeping
+    // this outside totk_rt_dir's token prevents recursive initialization.
+    NSString *cache = totk_rt_dir();
+    dispatch_once(&once, ^{
+        const char *seedPath = getenv("TOTK_SHADER_SEED_DIR");
+        NSString *seed = seedPath ? @(seedPath) : [root_dir() stringByAppendingPathComponent:@"build/shader-seed"];
+        state = totk_shader_observed_open(seed, cache, @DMSH_CHAIN);
+    });
+    return state;
+}
+
+NSSet<NSString *> *totk_rt_observed_shader_keys(void) {
+    return totk_shader_observed_keys(observed_keys_state());
 }
 
 static void service_start(void) {
@@ -180,6 +198,9 @@ static int no_translator(void) {
 NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, const uint8_t *code, NSDictionary *answers, NSArray *local) {
     uint64_t started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     pthread_mutex_lock(&g_rt_lock);
+    // Called for the game's actual shader bytes, including when a prepared
+    // variant already exists. Old cache files alone never become observed keys.
+    totk_shader_observed_note(observed_keys_state(), shader);
     NSMutableArray *vs = variants_of(shader);
     for (NSUInteger i = 0; i < vs.count; i++) {
         NSDictionary *v = vs[i];
