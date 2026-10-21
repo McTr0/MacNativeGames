@@ -14,7 +14,8 @@
 //    gpuarchiver-*, about 380 KB, PersistentState and its parts) that Metal never removes, not even when the process exits:
 //    432 folders in a one-minute first run, 65,536 folders and 25 GB overnight until no folder could be made any more
 //    (reported by the other session, 2026-10-21). Nothing holds them open once the archive is written, so par_write
-//    removes the one its own write made (par_ga_*).
+//    removes these on iOS, where the cache belongs to this app. On the Mac the directory is shared with other
+//    processes; timestamps or a before/after listing cannot establish ownership, so it is left alone (par_ga_*).
 // The key only finds the file: Metal checks the functions and state, so a wrong file is a miss, never a wrong pipeline.
 // On everywhere; TOTK_PIPELINE_ARCHIVE=0 turns it off. Valid for one OS version, GPU and translation chain
 // (pipelines/identity.json); otherwise the folder is removed. Included by nvn_mtl.m after MLOG and g_dev.
@@ -60,15 +61,20 @@ static NSString *par_hash(const void *bytes, size_t n) {
     for (int i = 0; i < 20; i++) [s appendFormat:@"%02x", d[i]];   // 160 bits name a file
     return s;
 }
-/* The folder Metal's archive builder works in (see the top). It is per user on the Mac, so other programs' folders are there
-   too: par_write removes only folders that appeared while it wrote, and writes one at a time (g_par_wmu) so a folder that
-   appears then is its own. */
+/* Serialize this process's archive writes. This lock does not synchronize other Metal clients.
+   Cleanup is restricted to iOS's app-private cache. The Mac's per-user cache can gain another process's folders
+   during our write; neither a new name nor a matching uid proves that we created it. Returning no directory on
+   the Mac prevents both enumeration and removal there. Our own archive .tmp files are still handled below. */
 static pthread_mutex_t g_par_wmu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_par_ga_removed;
 static NSString *par_ga_dir(void) {
+#if TARGET_OS_IPHONE
     static NSString *dir; static dispatch_once_t once;
     dispatch_once(&once, ^{ char b[PATH_MAX]; if (confstr(_CS_DARWIN_USER_CACHE_DIR, b, sizeof b)) dir = [@(b) stringByAppendingPathComponent:@"com.apple.gpuarchiver"]; });
     return dir;
+#else
+    return nil;   // shared per-user directory: no reliable process ownership
+#endif
 }
 static NSSet<NSString *> *par_ga_list(void) {
     NSString *dir = par_ga_dir();
